@@ -58,10 +58,10 @@ async function processVocal(file) {
   const arrayBuffer = await file.arrayBuffer();
   const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-  // offline processing for effect rendering
+  // Offline context for rendering effect
   const offlineCtx = new OfflineAudioContext(
     audioBuffer.numberOfChannels,
-    audioBuffer.length,
+    audioBuffer.length * 1.5, // allow reverb tail
     audioBuffer.sampleRate
   );
 
@@ -70,33 +70,57 @@ async function processVocal(file) {
 
   const intensity = parseFloat(document.getElementById("intensity").value);
 
-  // --- Core temporal displacement effect ---
-  const delayA = offlineCtx.createDelay();
-  const delayB = offlineCtx.createDelay();
-  const lfoA = offlineCtx.createOscillator();
-  const lfoB = offlineCtx.createOscillator();
-  const lfoGainA = offlineCtx.createGain();
-  const lfoGainB = offlineCtx.createGain();
+  // --- Ethereal effect chain ---
+  // Base delay widening
+  const delayLeft = offlineCtx.createDelay(0.5);
+  const delayRight = offlineCtx.createDelay(0.5);
+  delayLeft.delayTime.value = 0.02 + 0.03 * intensity;
+  delayRight.delayTime.value = 0.04 + 0.05 * intensity;
 
-  delayA.delayTime.value = 0.02;
-  delayB.delayTime.value = 0.04;
-  lfoA.frequency.value = 0.3 + intensity * 0.7;
-  lfoB.frequency.value = 0.6 + intensity * 0.8;
-  lfoGainA.gain.value = 0.02 * intensity;
-  lfoGainB.gain.value = 0.03 * intensity;
+  // Shimmer layer (simulated by highpass + feedback)
+  const shimmer = offlineCtx.createDelay(0.5);
+  shimmer.delayTime.value = 0.12;
+  const shimmerGain = offlineCtx.createGain();
+  shimmerGain.gain.value = 0.35 * intensity;
+  const shimmerFilter = offlineCtx.createBiquadFilter();
+  shimmerFilter.type = "highpass";
+  shimmerFilter.frequency.value = 3500;
 
-  lfoA.connect(lfoGainA).connect(delayA.delayTime);
-  lfoB.connect(lfoGainB).connect(delayB.delayTime);
+  // Feedback loop for shimmer
+  shimmer.connect(shimmerFilter);
+  shimmerFilter.connect(shimmerGain);
+  shimmerGain.connect(shimmer);
 
+  // Reverb simulation (soft lowpass tail)
+  const reverb = offlineCtx.createBiquadFilter();
+  reverb.type = "lowpass";
+  reverb.frequency.value = 2500 + intensity * 2500;
+
+  // LFO for subtle movement
+  const lfo = offlineCtx.createOscillator();
+  const lfoGain = offlineCtx.createGain();
+  lfo.frequency.value = 0.1 + intensity * 0.2; // slow movement
+  lfoGain.gain.value = 0.015 * intensity;
+  lfo.connect(lfoGain).connect(reverb.frequency);
+
+  // Routing
+  const merger = offlineCtx.createChannelMerger(2);
   const wetGain = offlineCtx.createGain();
   const dryGain = offlineCtx.createGain();
-  wetGain.gain.value = 0.6 * intensity;
-  dryGain.gain.value = 1.0 - 0.3 * intensity;
 
-  source.connect(delayA);
-  source.connect(delayB);
-  delayA.connect(wetGain);
-  delayB.connect(wetGain);
+  wetGain.gain.value = 0.7 * intensity;
+  dryGain.gain.value = 1.0 - 0.4 * intensity;
+
+  const leftChain = offlineCtx.createGain();
+  const rightChain = offlineCtx.createGain();
+
+  source.connect(delayLeft).connect(shimmer).connect(reverb).connect(leftChain);
+  source.connect(delayRight).connect(shimmer).connect(reverb).connect(rightChain);
+
+  leftChain.connect(merger, 0, 0);
+  rightChain.connect(merger, 0, 1);
+
+  merger.connect(wetGain);
   source.connect(dryGain);
 
   const output = offlineCtx.createGain();
@@ -104,8 +128,7 @@ async function processVocal(file) {
   dryGain.connect(output);
   output.connect(offlineCtx.destination);
 
-  lfoA.start(0);
-  lfoB.start(0);
+  lfo.start();
   source.start(0);
 
   const rendered = await offlineCtx.startRendering();
@@ -119,8 +142,8 @@ async function processVocal(file) {
   player.src = url;
   player.play();
 
-  // ✅ Force download
-  const fileName = "processed_vocal.wav";
+  // ✅ Auto-download
+  const fileName = "ethereal_vocal.wav";
   const a = document.createElement("a");
   a.style.display = "none";
   a.href = url;
@@ -133,7 +156,7 @@ async function processVocal(file) {
   const dl = document.getElementById("downloadLink");
   dl.href = url;
   dl.download = fileName;
-  dl.textContent = "Re-download Processed Vocal";
+  dl.textContent = "Re-download Ethereal Vocal";
   dl.classList.remove("hidden");
 }
 
@@ -158,7 +181,6 @@ const recordStatus = document.getElementById("recordStatus");
 
 recordBtn.addEventListener("click", async () => {
   if (!isRecording) {
-    // Start recording
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(stream);
     recordedChunks = [];
@@ -174,7 +196,6 @@ recordBtn.addEventListener("click", async () => {
         type: "audio/wav",
       });
 
-      // Load recording into upload input
       const fileInput = document.getElementById("audioFile");
       const dataTransfer = new DataTransfer();
       dataTransfer.items.add(file);
@@ -189,7 +210,6 @@ recordBtn.addEventListener("click", async () => {
     recordBtn.style.background = "#800000";
     recordStatus.textContent = "Recording...";
   } else {
-    // Stop recording
     mediaRecorder.stop();
     isRecording = false;
     recordStatus.textContent = "Finalizing...";
