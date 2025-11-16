@@ -26,7 +26,7 @@ function stopRecording() {
 document.getElementById("recordBtn").onclick = startRecording;
 document.getElementById("stopBtn").onclick = stopRecording;
 
-// ------------------ PROCESS AUDIO (ALIEN TIMBRE) ------------------
+// ------------------ PROCESS AUDIO (ALIEN TIMBRE + SMOOTH ROBOTIC MODE) ------------------
 
 document.getElementById("processBtn").onclick = async () => {
     if (!recordedBlob) {
@@ -44,8 +44,13 @@ document.getElementById("processBtn").onclick = async () => {
         audioBuffer.sampleRate
     );
 
-    const fib = [1, 2, 3, 5, 8, 13]; // small ratios only
-    const strength = 0.0035; // *timbral warp*, not delay
+    // Fibonacci offsets for phase lensing
+    const fib = [1, 2, 3, 5, 8, 13];
+    const strength = 0.0035;
+
+    // New robotic smoothing settings
+    const roboPhaseSteps = 32;  // more = smoother robot tone
+    const roboStrength = 0.18;  // blend amount
 
     for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
         const input = audioBuffer.getChannelData(ch);
@@ -54,21 +59,28 @@ document.getElementById("processBtn").onclick = async () => {
         for (let i = 0; i < input.length; i++) {
             let sample = input[i];
 
-            // apply Fibonacci phase-warp (no pitch shifting)
+            // --- TEMPORAL FIBONACCI LENS (ALIEN TIMBRE WARP) ---
             let warped = 0;
-
             for (let f of fib) {
                 let offset = Math.floor(f * strength * audioBuffer.sampleRate);
                 let index = i + offset;
-
                 if (index < input.length) {
-                    // phase inversion creates alien timbre
                     warped += input[index] * Math.cos(f * 0.33);
                 }
             }
 
-            // Main signal + warped timbre overlay
-            output[i] = (sample * 0.7) + (warped * 0.3);
+            // Blend timbre warp into original
+            let timbreWarp = (sample * 0.7) + (warped * 0.3);
+
+            // --- SMOOTH ROBOTIC PHASE QUANTIZATION ---
+            const phase = Math.atan2(timbreWarp, 1.0); 
+            const step = (Math.PI * 2) / roboPhaseSteps;
+            const quantizedPhase = Math.round(phase / step) * step;
+
+            const robotic = Math.sin(quantizedPhase);
+
+            // Final blend: smooth robotic + alien timbre
+            output[i] = (timbreWarp * (1 - roboStrength)) + (robotic * roboStrength);
         }
     }
 
@@ -95,7 +107,7 @@ function bufferToWav(buffer) {
         }
     }
 
-    // WAV Header
+    // WAV header
     writeString("RIFF");
     view.setUint32(offset, 36 + buffer.length * numOfChannels * 2, true); offset += 4;
     writeString("WAVE");
@@ -110,7 +122,7 @@ function bufferToWav(buffer) {
     writeString("data");
     view.setUint32(offset, buffer.length * numOfChannels * 2, true); offset += 4;
 
-    // PCM Samples
+    // PCM samples
     let pos = 44;
     for (let c = 0; c < numOfChannels; c++) {
         const channel = buffer.getChannelData(c);
@@ -123,4 +135,3 @@ function bufferToWav(buffer) {
 
     return new Blob([arrayBuffer], { type: "audio/wav" });
 }
-
