@@ -31,7 +31,6 @@ async function startRecording() {
         recordStatus.textContent = "Recording…";
     } catch (err) {
         recordStatus.textContent = "Mic blocked!";
-        console.error(err);
     }
 }
 
@@ -43,13 +42,10 @@ function stopRecording() {
     }
 }
 
-// toggle record on/off with the same button
+// toggle record
 recordBtn.onclick = () => {
-    if (!mediaRecorder || mediaRecorder.state === "inactive") {
-        startRecording();
-    } else {
-        stopRecording();
-    }
+    if (!mediaRecorder || mediaRecorder.state === "inactive") startRecording();
+    else stopRecording();
 };
 
 // ------------------- FILE UPLOAD ---------------------
@@ -77,9 +73,10 @@ processBtn.onclick = async () => {
         audioBuffer.sampleRate
     );
 
+    // Fibonacci motion pattern
     const fib = [1, 2, 3, 5, 8, 13];
-    const amount = parseFloat(intensitySlider.value); // 0–1
-    const warp = 0.0025 + amount * 0.01;
+    const amount = parseFloat(intensitySlider.value); // 0-1
+    const warpDistance = 0.0003 + amount * 0.002; // smaller = smoother, no volume loss
 
     for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
         const input = audioBuffer.getChannelData(ch);
@@ -87,19 +84,32 @@ processBtn.onclick = async () => {
 
         for (let i = 0; i < input.length; i++) {
             let sample = input[i];
-            let warped = 0;
+
+            // --------------- vowel liquification ----------------
+            // Formants smear by *blending* near-frequency samples,
+            // following a Fibonacci oscillation that shifts phase
+            // but preserves loudness.
+
+            let smear = 0;
+            let weightSum = 0;
 
             for (let f of fib) {
-                const offset = Math.floor(f * warp * audioBuffer.sampleRate);
-                const index = i + offset;
+                const offset = Math.floor(Math.sin(i * 0.00003 * f) * warpDistance * audioBuffer.sampleRate);
 
-                if (index < input.length) {
-                    // TIMBRE warp — NO pitch / NO harmony / NO delay
-                    warped += input[index] * Math.sin(f * 0.52);
+                const index = i + offset;
+                if (index >= 0 && index < input.length) {
+                    const w = 1 / f; // higher f → lighter contribution (smooth)
+                    smear += input[index] * w;
+                    weightSum += w;
                 }
             }
 
-            output[i] = sample * (1 - amount * 0.4) + warped * (amount * 0.4);
+            // normalized smear (NO volume drop)
+            smear = smear / weightSum;
+
+            // blend original + liquified vowel texture
+            const intensity = amount * 0.85; // keeps it strong but not destructive
+            output[i] = sample * (1 - intensity) + smear * intensity;
         }
     }
 
@@ -110,7 +120,7 @@ processBtn.onclick = async () => {
 
     // download
     downloadLink.href = URL.createObjectURL(wavBlob);
-    downloadLink.download = "glitchbox-processed.wav";
+    downloadLink.download = "liquid-vocal.wav";
     downloadLink.classList.remove("hidden");
     downloadLink.textContent = "Download Processed Vocal";
 };
@@ -124,9 +134,9 @@ function bufferToWav(buffer) {
     const view = new DataView(arrayBuffer);
 
     let offset = 0;
-    function writeString(s) {
+    const writeString = s => {
         for (let i = 0; i < s.length; i++) view.setUint8(offset++, s.charCodeAt(i));
-    }
+    };
 
     writeString("RIFF");
     view.setUint32(offset, 36 + buffer.length * numOfChannels * 2, true); offset += 4;
