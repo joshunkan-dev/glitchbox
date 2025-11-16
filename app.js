@@ -1,212 +1,122 @@
-// --- Convert AudioBuffer to WAV ---
-function audioBufferToWav(buffer) {
-  const numOfChan = buffer.numberOfChannels,
-    length = buffer.length * numOfChan * 2 + 44,
-    bufferArray = new ArrayBuffer(length),
-    view = new DataView(bufferArray),
-    channels = [],
-    sampleRate = buffer.sampleRate;
-  let offset = 0;
-  let pos = 0;
+// --- Core Spectral Granular Warp (Alien, non-delay) ---
+const frameSize = 1024;
+const hop = 512;
 
-  function setUint16(data) {
-    view.setUint16(pos, data, true);
-    pos += 2;
-  }
-  function setUint32(data) {
-    view.setUint32(pos, data, true);
-    pos += 4;
-  }
+const offline = offlineCtx;
+const sampleRate = offline.sampleRate;
+const input = audioBuffer.getChannelData(0);
+const out = new Float32Array(input.length);
 
-  // RIFF header
-  setUint32(0x46464952);
-  setUint32(length - 8);
-  setUint32(0x45564157);
-
-  // fmt chunk
-  setUint32(0x20746d66);
-  setUint32(16);
-  setUint16(1);
-  setUint16(numOfChan);
-  setUint32(sampleRate);
-  setUint32(sampleRate * 2 * numOfChan);
-  setUint16(numOfChan * 2);
-  setUint16(16);
-
-  // data chunk
-  setUint32(0x61746164);
-  setUint32(length - pos - 4);
-
-  for (let i = 0; i < buffer.numberOfChannels; i++)
-    channels.push(buffer.getChannelData(i));
-
-  while (pos < length) {
-    for (let i = 0; i < numOfChan; i++) {
-      const sample = Math.max(-1, Math.min(1, channels[i][offset]));
-      view.setInt16(pos, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
-      pos += 2;
-    }
-    offset++;
-  }
-
-  return bufferArray;
-}
-
-// --- FFT helpers ---
-function fft(real, imag) {
-  const n = real.length;
-  let j = 0;
-  for (let i = 1; i < n; i++) {
-    let bit = n >> 1;
-    while (j & bit) {
-      j ^= bit;
-      bit >>= 1;
-    }
-    j ^= bit;
-    if (i < j) {
-      [real[i], real[j]] = [real[j], real[i]];
-      [imag[i], imag[j]] = [imag[j], imag[i]];
-    }
-  }
-
-  for (let len = 2; len <= n; len <<= 1) {
-    const angle = -2 * Math.PI / len;
-    const wlen_r = Math.cos(angle);
-    const wlen_i = Math.sin(angle);
-    for (let i = 0; i < n; i += len) {
-      let wr = 1, wi = 0;
-      for (let j2 = 0; j2 < len / 2; j2++) {
-        const u_r = real[i + j2];
-        const u_i = imag[i + j2];
-        const v_r = real[i + j2 + len / 2] * wr - imag[i + j2 + len / 2] * wi;
-        const v_i = real[i + j2 + len / 2] * wi + imag[i + j2 + len / 2] * wr;
-        real[i + j2] = u_r + v_r;
-        imag[i + j2] = u_i + v_i;
-        real[i + j2 + len / 2] = u_r - v_r;
-        imag[i + j2 + len / 2] = u_i - v_i;
-        const next_wr = wr * wlen_r - wi * wlen_i;
-        const next_wi = wr * wlen_i + wi * wlen_r;
-        wr = next_wr;
-        wi = next_wi;
-      }
-    }
-  }
-}
-
-function ifft(real, imag) {
-  for (let i = 0; i < real.length; i++) imag[i] = -imag[i];
-  fft(real, imag);
-  for (let i = 0; i < real.length; i++) {
-    real[i] /= real.length;
-    imag[i] = -imag[i] / real.length;
-  }
-}
-
+// Hann window
 function hann(N) {
   const w = new Float32Array(N);
-  for (let i = 0; i < N; i++) w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+  for (let i = 0; i < N; i++) {
+    w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+  }
   return w;
 }
 
-function fibSequence(maxVal) {
-  const seq = [1, 1];
-  while (seq[seq.length - 1] + seq[seq.length - 2] <= maxVal) {
-    seq.push(seq[seq.length - 1] + seq[seq.length - 2]);
+const window = hann(frameSize);
+
+// Simple FFT library (in-place)
+function fft(re, im) {
+  const n = re.length;
+  let j = 0;
+  for (let i = 1; i < n; i++) {
+    let bit = n >> 1;
+    while (j & bit) { j ^= bit; bit >>= 1; }
+    j ^= bit;
+    if (i < j) {
+      [re[i], re[j]] = [re[j], re[i]];
+      [im[i], im[j]] = [im[j], im[i]];
+    }
   }
-  return seq;
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len;
+    const wlen_r = Math.cos(ang);
+    const wlen_i = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let wr = 1, wi = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const u_r = re[i + k], u_i = im[i + k];
+        const v_r = re[i + k + len/2] * wr - im[i + k + len/2] * wi;
+        const v_i = re[i + k + len/2] * wi + im[i + k + len/2] * wr;
+        re[i + k] = u_r + v_r;
+        im[i + k] = u_i + v_i;
+        re[i + k + len/2] = u_r - v_r;
+        im[i + k + len/2] = u_i - v_i;
+        const nwr = wr * wlen_r - wi * wlen_i;
+        const nwi = wr * wlen_i + wi * wlen_r;
+        wr = nwr;
+        wi = nwi;
+      }
+    }
+  }
 }
 
-// --- Fibonacci Spectral Bloom ---
-async function processVocal(file) {
-  if (!file) return alert("Please upload or record a vocal first.");
+function ifft(re, im) {
+  for (let i = 0; i < re.length; i++) im[i] = -im[i];
+  fft(re, im);
+  for (let i = 0; i < re.length; i++) {
+    re[i] /= re.length;
+    im[i] = -im[i] / re.length;
+  }
+}
 
-  const intensity = parseFloat(document.getElementById("intensity").value) || 0.5;
-  const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const arrayBuffer = await file.arrayBuffer();
-  const inputBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-  const input = inputBuffer.getChannelData(0);
-  const sr = inputBuffer.sampleRate;
+// MAIN PROCESSING LOOP
+for (let start = 0; start < input.length; start += hop) {
+  const re = new Float32Array(frameSize);
+  const im = new Float32Array(frameSize);
 
-  const winSize = 2048;
-  const hop = winSize / 2;
-  const window = hann(winSize);
-  const fibs = fibSequence(winSize / 2);
-  const fibDecay = (f) => Math.exp(-f / 8);
+  // Window input
+  for (let i = 0; i < frameSize; i++) {
+    const idx = start + i;
+    re[i] = idx < input.length ? input[idx] * window[i] : 0;
+    im[i] = 0;
+  }
 
-  const output = new Float32Array(input.length);
-  const norm = new Float32Array(input.length);
-  const real = new Float32Array(winSize);
-  const imag = new Float32Array(winSize);
+  // FFT
+  fft(re, im);
 
-  for (let frame = 0; frame < input.length; frame += hop) {
-    for (let i = 0; i < winSize; i++) {
-      const idx = frame + i;
-      real[i] = idx < input.length ? input[idx] * window[i] : 0;
-      imag[i] = 0;
-    }
+  // --- 🔮 Spectral Grain Warp ---
+  // For each FFT bin, micro-randomly reassign the magnitude to nearby bins.
+  // This is NOT pitch shift, NOT delay, NOT vocoder — it's pure spectral texture morphing.
+  const warpAmount = Math.floor(8 + intensity * 40); // how many bins can shift
+  for (let k = 1; k < frameSize/2; k++) {
+    const randShift = Math.floor((Math.random() - 0.5) * warpAmount);
+    const t = k + randShift;
 
-    fft(real, imag);
-    const origR = new Float32Array(real);
-    const origI = new Float32Array(imag);
-    const half = winSize / 2;
+    if (t > 1 && t < frameSize/2) {
+      // swap magnitudes but keep original phases
+      const magSrc = Math.hypot(re[k], im[k]);
+      const phaseSrc = Math.atan2(im[k], re[k]);
 
-    for (let k = 0; k < half; k++) {
-      let accR = origR[k];
-      let accI = origI[k];
-      const freqFactor = 1 - Math.sqrt(k / half) * 0.35;
+      re[k] = magSrc * Math.cos(phaseSrc);
+      im[k] = magSrc * Math.sin(phaseSrc);
 
-      for (const f of fibs) {
-        const w = intensity * 0.18 * fibDecay(f) * freqFactor;
-        const pos = k + f;
-        const neg = k - f;
-        if (pos < half) {
-          accR += origR[pos] * w;
-          accI += origI[pos] * w;
-        }
-        if (neg >= 0) {
-          accR += origR[neg] * w * 0.7;
-          accI += origI[neg] * w * 0.7;
-        }
-      }
-
-      real[k] = accR;
-      imag[k] = accI;
-      if (k > 0) {
-        real[winSize - k] = real[k];
-        imag[winSize - k] = -imag[k];
-      }
-    }
-
-    ifft(real, imag);
-
-    for (let i = 0; i < winSize; i++) {
-      const idx = frame + i;
-      if (idx < output.length) {
-        output[idx] += real[i] * window[i];
-        norm[idx] += window[i] * window[i];
-      }
+      // tiny random phase bend to avoid robotic sound
+      const bend = (Math.random() - 0.5) * 0.1 * intensity;
+      re[k] *= Math.cos(bend);
+      im[k] *= Math.sin(bend);
     }
   }
 
-  for (let i = 0; i < output.length; i++) {
-    if (norm[i] > 1e-8) output[i] /= norm[i];
+  // Mirror for real output
+  for (let k = 1; k < frameSize/2; k++) {
+    re[frameSize - k] = re[k];
+    im[frameSize - k] = -im[k];
   }
 
-  const offlineCtx = new OfflineAudioContext(1, output.length, sr);
-  const outBuffer = offlineCtx.createBuffer(1, output.length, sr);
-  outBuffer.getChannelData(0).set(output);
+  // IFFT
+  ifft(re, im);
 
-  const source = offlineCtx.createBufferSource();
-  source.buffer = outBuffer;
-  const filter = offlineCtx.createBiquadFilter();
-  filter.type = "lowpass";
-  filter.frequency.value = 12000 - intensity * 4000;
-  source.connect(filter).connect(offlineCtx.destination);
-  source.start();
+  // Overlap-add
+  for (let i = 0; i < frameSize; i++) {
+    const idx = start + i;
+    if (idx < out.length) out[idx] += re[i] * window[i];
+  }
+}
 
-  const rendered = await offlineCtx.startRendering();
-  const wav = audioBufferToWav(rendered);
-  const blob = new Blob([new DataView(wav)], { type: "audio/wav" });
-  const url = URL.createObjectURL(blob);
-
-  const player = document.getElementBy
+// Write output buffer
+const outputBuffer = offline.createBuffer(1, out.length, sampleRate);
+outputBuffer.copyToChannel(out, 0);
