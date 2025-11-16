@@ -1,9 +1,6 @@
 let mediaRecorder;
 let audioChunks = [];
 let recordedBlob = null;
-let processedBlob = null;
-
-// ------------------ RECORDING ------------------
 
 async function startRecording() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -29,11 +26,11 @@ function stopRecording() {
 document.getElementById("recordBtn").onclick = startRecording;
 document.getElementById("stopBtn").onclick = stopRecording;
 
-// ------------------ PROCESS WITHOUT DOWNLOADING ------------------
+// ------------------ PROCESS AUDIO (ALIEN TIMBRE) ------------------
 
 document.getElementById("processBtn").onclick = async () => {
     if (!recordedBlob) {
-        alert("Record something first!");
+        alert("Record first!");
         return;
     }
 
@@ -47,9 +44,8 @@ document.getElementById("processBtn").onclick = async () => {
         audioBuffer.sampleRate
     );
 
-    // Fibonacci timbre-warp factors
-    const fib = [1, 2, 3, 5, 8, 13];
-    const strength = 0.0035;
+    const fib = [1, 2, 3, 5, 8, 13]; // small ratios only
+    const strength = 0.0035; // *timbral warp*, not delay
 
     for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
         const input = audioBuffer.getChannelData(ch);
@@ -57,6 +53,8 @@ document.getElementById("processBtn").onclick = async () => {
 
         for (let i = 0; i < input.length; i++) {
             let sample = input[i];
+
+            // apply Fibonacci phase-warp (no pitch shifting)
             let warped = 0;
 
             for (let f of fib) {
@@ -64,56 +62,43 @@ document.getElementById("processBtn").onclick = async () => {
                 let index = i + offset;
 
                 if (index < input.length) {
+                    // phase inversion creates alien timbre
                     warped += input[index] * Math.cos(f * 0.33);
                 }
             }
 
+            // Main signal + warped timbre overlay
             output[i] = (sample * 0.7) + (warped * 0.3);
         }
     }
 
-    processedBlob = bufferToWav(processed);
-
-    // Audio player preview
-    const audioURL = URL.createObjectURL(processedBlob);
-    document.getElementById("preview").src = audioURL;
-
-    alert("Processing complete! Listen to preview or download below.");
-};
-
-// ------------------ DOWNLOAD BUTTON ------------------
-
-document.getElementById("downloadBtn").onclick = () => {
-    if (!processedBlob) {
-        alert("You must process audio first!");
-        return;
-    }
-
+    // Export WAV
+    const wavBlob = bufferToWav(processed);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(processedBlob);
+    a.href = URL.createObjectURL(wavBlob);
     a.download = "glitchbox-processed.wav";
     a.click();
 };
 
-// ------------------ WAV ENCODER ------------------
-
+// -------- WAV ENCODER --------
 function bufferToWav(buffer) {
     const numOfChannels = buffer.numberOfChannels;
     const length = buffer.length * numOfChannels * 2 + 44;
     const arrayBuffer = new ArrayBuffer(length);
     const view = new DataView(arrayBuffer);
+
     let offset = 0;
 
-    function writeString(s) {
-        for (let i = 0; i < s.length; i++) {
-            view.setUint8(offset++, s.charCodeAt(i));
+    function writeString(str) {
+        for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset++, str.charCodeAt(i));
         }
     }
 
+    // WAV Header
     writeString("RIFF");
     view.setUint32(offset, 36 + buffer.length * numOfChannels * 2, true); offset += 4;
     writeString("WAVE");
-
     writeString("fmt ");
     view.setUint32(offset, 16, true); offset += 4;
     view.setUint16(offset, 1, true); offset += 2;
@@ -122,14 +107,13 @@ function bufferToWav(buffer) {
     view.setUint32(offset, buffer.sampleRate * numOfChannels * 2, true); offset += 4;
     view.setUint16(offset, numOfChannels * 2, true); offset += 2;
     view.setUint16(offset, 16, true); offset += 2;
-
     writeString("data");
     view.setUint32(offset, buffer.length * numOfChannels * 2, true); offset += 4;
 
+    // PCM Samples
     let pos = 44;
-
-    for (let ch = 0; ch < numOfChannels; ch++) {
-        const channel = buffer.getChannelData(ch);
+    for (let c = 0; c < numOfChannels; c++) {
+        const channel = buffer.getChannelData(c);
         for (let i = 0; i < channel.length; i++) {
             let val = Math.max(-1, Math.min(1, channel[i]));
             view.setInt16(pos, val * 0x7FFF, true);
