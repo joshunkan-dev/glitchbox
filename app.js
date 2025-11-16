@@ -1,131 +1,177 @@
-let mediaRecorder;
+let mediaRecorder = null;
 let audioChunks = [];
 let recordedBlob = null;
+let isRecording = false;
 
-async function startRecording() {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
+// ------------------------
+// RECORD BUTTON (TOGGLE)
+// ------------------------
+document.getElementById("recordBtn").onclick = async () => {
+    if (!isRecording) {
+        // Start recording
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            audioChunks = [];
+            recordedBlob = null;
 
-    mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
-    mediaRecorder.onstop = () => {
-        recordedBlob = new Blob(audioChunks, { type: "audio/wav" });
-        audioChunks = [];
-        alert("Recording finished!");
-    };
+            mediaRecorder = new MediaRecorder(stream);
 
-    mediaRecorder.start();
-    alert("Recording started!");
-}
+            mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
 
-function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.onstop = () => {
+                recordedBlob = new Blob(audioChunks, { type: "audio/webm" });
+                document.getElementById("recordStatus").textContent = "Recording complete!";
+            };
+
+            mediaRecorder.start();
+            isRecording = true;
+            document.getElementById("recordStatus").textContent = "Recording...";
+            document.getElementById("recordBtn").style.background = "#800000";
+
+        } catch (err) {
+            alert("Microphone access failed.");
+            console.error(err);
+        }
+    } else {
+        // Stop recording
         mediaRecorder.stop();
+        isRecording = false;
+        document.getElementById("recordBtn").style.background = "red";
+        document.getElementById("recordStatus").textContent = "Finalizing audio...";
     }
-}
+};
 
-document.getElementById("recordBtn").onclick = startRecording;
-document.getElementById("stopBtn").onclick = stopRecording;
-
-// ------------------ PROCESS AUDIO (ALIEN TIMBRE + SMOOTH ROBOTIC MODE) ------------------
-
+// ------------------------------
+// PROCESS BUTTON
+// ------------------------------
 document.getElementById("processBtn").onclick = async () => {
-    if (!recordedBlob) {
-        alert("Record first!");
+
+    let file = null;
+
+    // Priority: recorded vocal
+    if (recordedBlob) {
+        file = recordedBlob;
+    }
+
+    // Otherwise: uploaded file
+    const fileInput = document.getElementById("audioFile");
+    if (!file && fileInput.files.length > 0) {
+        file = fileInput.files[0];
+    }
+
+    if (!file) {
+        alert("Upload or record a vocal first.");
         return;
     }
 
-    const arrayBuffer = await recordedBlob.arrayBuffer();
+    const intensity = parseFloat(document.getElementById("intensity").value);
+
+    const arrayBuffer = await file.arrayBuffer();
     const audioCtx = new AudioContext();
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
+    // OUTPUT BUFFER
     const processed = audioCtx.createBuffer(
         audioBuffer.numberOfChannels,
         audioBuffer.length,
         audioBuffer.sampleRate
     );
 
-    // Fibonacci offsets for phase lensing
+    // --- Alien timbre engine ---
     const fib = [1, 2, 3, 5, 8, 13];
-    const strength = 0.0035;
+    const warpStrength = 0.004 * intensity;
+    const phaseSteps = 32;
+    const roboBlend = 0.15 + (0.3 * intensity);
 
-    // New robotic smoothing settings
-    const roboPhaseSteps = 32;  // more = smoother robot tone
-    const roboStrength = 0.18;  // blend amount
-
-    for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    for (let ch = 0; ch < processed.numberOfChannels; ch++) {
         const input = audioBuffer.getChannelData(ch);
         const output = processed.getChannelData(ch);
 
         for (let i = 0; i < input.length; i++) {
-            let sample = input[i];
+            const sample = input[i];
 
-            // --- TEMPORAL FIBONACCI LENS (ALIEN TIMBRE WARP) ---
+            // Fibonacci timbre warp (no delay fx)
             let warped = 0;
             for (let f of fib) {
-                let offset = Math.floor(f * strength * audioBuffer.sampleRate);
-                let index = i + offset;
-                if (index < input.length) {
-                    warped += input[index] * Math.cos(f * 0.33);
-                }
+                const offset = Math.floor(f * warpStrength * audioBuffer.sampleRate);
+                const ix = i + offset;
+                if (ix < input.length) warped += input[ix] * Math.cos(f * 0.4);
             }
 
-            // Blend timbre warp into original
-            let timbreWarp = (sample * 0.7) + (warped * 0.3);
+            const timbre = sample * 0.75 + warped * 0.25;
 
-            // --- SMOOTH ROBOTIC PHASE QUANTIZATION ---
-            const phase = Math.atan2(timbreWarp, 1.0); 
-            const step = (Math.PI * 2) / roboPhaseSteps;
-            const quantizedPhase = Math.round(phase / step) * step;
+            // Phase-quantized robotic smoothing
+            const phase = Math.atan2(timbre, 1.0);
+            const step = (Math.PI * 2) / phaseSteps;
+            const quantized = Math.sin(Math.round(phase / step) * step);
 
-            const robotic = Math.sin(quantizedPhase);
-
-            // Final blend: smooth robotic + alien timbre
-            output[i] = (timbreWarp * (1 - roboStrength)) + (robotic * roboStrength);
+            output[i] = timbre * (1 - roboBlend) + quantized * roboBlend;
         }
     }
 
-    // Export WAV
+    // WAV EXPORT
     const wavBlob = bufferToWav(processed);
+    const url = URL.createObjectURL(wavBlob);
+
+    // Update audio player
+    const player = document.getElementById("player");
+    player.src = url;
+    player.play();
+
+    // Auto download
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(wavBlob);
+    a.href = url;
     a.download = "glitchbox-processed.wav";
     a.click();
+
+    // Update download link
+    const dl = document.getElementById("downloadLink");
+    dl.href = url;
+    dl.download = "glitchbox-processed.wav";
+    dl.classList.remove("hidden");
+    dl.textContent = "Re-download Processed Vocal";
+
+    document.getElementById("recordStatus").textContent = "Processed!";
 };
 
-// -------- WAV ENCODER --------
+
+// -------------------------
+// WAV ENCODER
+// -------------------------
 function bufferToWav(buffer) {
-    const numOfChannels = buffer.numberOfChannels;
-    const length = buffer.length * numOfChannels * 2 + 44;
-    const arrayBuffer = new ArrayBuffer(length);
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const numFrames = buffer.length;
+    const dataSize = numFrames * numChannels * 2;
+
+    const arrayBuffer = new ArrayBuffer(44 + dataSize);
     const view = new DataView(arrayBuffer);
 
     let offset = 0;
 
-    function writeString(str) {
-        for (let i = 0; i < str.length; i++) {
-            view.setUint8(offset++, str.charCodeAt(i));
-        }
+    function writeString(s) {
+        for (let i = 0; i < s.length; i++) view.setUint8(offset++, s.charCodeAt(i));
     }
 
-    // WAV header
     writeString("RIFF");
-    view.setUint32(offset, 36 + buffer.length * numOfChannels * 2, true); offset += 4;
+    view.setUint32(offset, 36 + dataSize, true); offset += 4;
     writeString("WAVE");
+
     writeString("fmt ");
     view.setUint32(offset, 16, true); offset += 4;
     view.setUint16(offset, 1, true); offset += 2;
-    view.setUint16(offset, numOfChannels, true); offset += 2;
-    view.setUint32(offset, buffer.sampleRate, true); offset += 4;
-    view.setUint32(offset, buffer.sampleRate * numOfChannels * 2, true); offset += 4;
-    view.setUint16(offset, numOfChannels * 2, true); offset += 2;
+    view.setUint16(offset, numChannels, true); offset += 2;
+    view.setUint32(offset, sampleRate, true); offset += 4;
+    view.setUint32(offset, sampleRate * numChannels * 2, true); offset += 4;
+    view.setUint16(offset, numChannels * 2, true); offset += 2;
     view.setUint16(offset, 16, true); offset += 2;
-    writeString("data");
-    view.setUint32(offset, buffer.length * numOfChannels * 2, true); offset += 4;
 
-    // PCM samples
+    writeString("data");
+    view.setUint32(offset, dataSize, true); offset += 4;
+
     let pos = 44;
-    for (let c = 0; c < numOfChannels; c++) {
-        const channel = buffer.getChannelData(c);
+    for (let ch = 0; ch < numChannels; ch++) {
+        const channel = buffer.getChannelData(ch);
         for (let i = 0; i < channel.length; i++) {
             let val = Math.max(-1, Math.min(1, channel[i]));
             view.setInt16(pos, val * 0x7FFF, true);
