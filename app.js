@@ -19,12 +19,12 @@ function audioBufferToWav(buffer) {
   }
 
   // RIFF header
-  setUint32(0x46464952); // "RIFF"
+  setUint32(0x46464952);
   setUint32(length - 8);
-  setUint32(0x45564157); // "WAVE"
+  setUint32(0x45564157);
 
   // fmt chunk
-  setUint32(0x20746d66); // "fmt "
+  setUint32(0x20746d66);
   setUint32(16);
   setUint16(1);
   setUint16(numOfChan);
@@ -34,7 +34,7 @@ function audioBufferToWav(buffer) {
   setUint16(16);
 
   // data chunk
-  setUint32(0x61746164); // "data"
+  setUint32(0x61746164);
   setUint32(length - pos - 4);
 
   for (let i = 0; i < buffer.numberOfChannels; i++)
@@ -52,166 +52,161 @@ function audioBufferToWav(buffer) {
   return bufferArray;
 }
 
-// --- Process uploaded or recorded vocal ---
+// --- FFT helpers ---
+function fft(real, imag) {
+  const n = real.length;
+  let j = 0;
+  for (let i = 1; i < n; i++) {
+    let bit = n >> 1;
+    while (j & bit) {
+      j ^= bit;
+      bit >>= 1;
+    }
+    j ^= bit;
+    if (i < j) {
+      [real[i], real[j]] = [real[j], real[i]];
+      [imag[i], imag[j]] = [imag[j], imag[i]];
+    }
+  }
+
+  for (let len = 2; len <= n; len <<= 1) {
+    const angle = -2 * Math.PI / len;
+    const wlen_r = Math.cos(angle);
+    const wlen_i = Math.sin(angle);
+    for (let i = 0; i < n; i += len) {
+      let wr = 1, wi = 0;
+      for (let j2 = 0; j2 < len / 2; j2++) {
+        const u_r = real[i + j2];
+        const u_i = imag[i + j2];
+        const v_r = real[i + j2 + len / 2] * wr - imag[i + j2 + len / 2] * wi;
+        const v_i = real[i + j2 + len / 2] * wi + imag[i + j2 + len / 2] * wr;
+        real[i + j2] = u_r + v_r;
+        imag[i + j2] = u_i + v_i;
+        real[i + j2 + len / 2] = u_r - v_r;
+        imag[i + j2 + len / 2] = u_i - v_i;
+        const next_wr = wr * wlen_r - wi * wlen_i;
+        const next_wi = wr * wlen_i + wi * wlen_r;
+        wr = next_wr;
+        wi = next_wi;
+      }
+    }
+  }
+}
+
+function ifft(real, imag) {
+  for (let i = 0; i < real.length; i++) imag[i] = -imag[i];
+  fft(real, imag);
+  for (let i = 0; i < real.length; i++) {
+    real[i] /= real.length;
+    imag[i] = -imag[i] / real.length;
+  }
+}
+
+function hann(N) {
+  const w = new Float32Array(N);
+  for (let i = 0; i < N; i++) w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (N - 1)));
+  return w;
+}
+
+function fibSequence(maxVal) {
+  const seq = [1, 1];
+  while (seq[seq.length - 1] + seq[seq.length - 2] <= maxVal) {
+    seq.push(seq[seq.length - 1] + seq[seq.length - 2]);
+  }
+  return seq;
+}
+
+// --- Fibonacci Spectral Bloom ---
 async function processVocal(file) {
+  if (!file) return alert("Please upload or record a vocal first.");
+
+  const intensity = parseFloat(document.getElementById("intensity").value) || 0.5;
   const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const arrayBuffer = await file.arrayBuffer();
-  const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  const inputBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+  const input = inputBuffer.getChannelData(0);
+  const sr = inputBuffer.sampleRate;
 
-  // Offline context for rendering effect
-  const offlineCtx = new OfflineAudioContext(
-    audioBuffer.numberOfChannels,
-    audioBuffer.length * 1.5, // allow reverb tail
-    audioBuffer.sampleRate
-  );
+  const winSize = 2048;
+  const hop = winSize / 2;
+  const window = hann(winSize);
+  const fibs = fibSequence(winSize / 2);
+  const fibDecay = (f) => Math.exp(-f / 8);
+
+  const output = new Float32Array(input.length);
+  const norm = new Float32Array(input.length);
+  const real = new Float32Array(winSize);
+  const imag = new Float32Array(winSize);
+
+  for (let frame = 0; frame < input.length; frame += hop) {
+    for (let i = 0; i < winSize; i++) {
+      const idx = frame + i;
+      real[i] = idx < input.length ? input[idx] * window[i] : 0;
+      imag[i] = 0;
+    }
+
+    fft(real, imag);
+    const origR = new Float32Array(real);
+    const origI = new Float32Array(imag);
+    const half = winSize / 2;
+
+    for (let k = 0; k < half; k++) {
+      let accR = origR[k];
+      let accI = origI[k];
+      const freqFactor = 1 - Math.sqrt(k / half) * 0.35;
+
+      for (const f of fibs) {
+        const w = intensity * 0.18 * fibDecay(f) * freqFactor;
+        const pos = k + f;
+        const neg = k - f;
+        if (pos < half) {
+          accR += origR[pos] * w;
+          accI += origI[pos] * w;
+        }
+        if (neg >= 0) {
+          accR += origR[neg] * w * 0.7;
+          accI += origI[neg] * w * 0.7;
+        }
+      }
+
+      real[k] = accR;
+      imag[k] = accI;
+      if (k > 0) {
+        real[winSize - k] = real[k];
+        imag[winSize - k] = -imag[k];
+      }
+    }
+
+    ifft(real, imag);
+
+    for (let i = 0; i < winSize; i++) {
+      const idx = frame + i;
+      if (idx < output.length) {
+        output[idx] += real[i] * window[i];
+        norm[idx] += window[i] * window[i];
+      }
+    }
+  }
+
+  for (let i = 0; i < output.length; i++) {
+    if (norm[i] > 1e-8) output[i] /= norm[i];
+  }
+
+  const offlineCtx = new OfflineAudioContext(1, output.length, sr);
+  const outBuffer = offlineCtx.createBuffer(1, output.length, sr);
+  outBuffer.getChannelData(0).set(output);
 
   const source = offlineCtx.createBufferSource();
-  source.buffer = audioBuffer;
-
-  const intensity = parseFloat(document.getElementById("intensity").value);
-
-  // --- Ethereal effect chain ---
-  // Base delay widening
-  const delayLeft = offlineCtx.createDelay(0.5);
-  const delayRight = offlineCtx.createDelay(0.5);
-  delayLeft.delayTime.value = 0.02 + 0.03 * intensity;
-  delayRight.delayTime.value = 0.04 + 0.05 * intensity;
-
-  // Shimmer layer (simulated by highpass + feedback)
-  const shimmer = offlineCtx.createDelay(0.5);
-  shimmer.delayTime.value = 0.12;
-  const shimmerGain = offlineCtx.createGain();
-  shimmerGain.gain.value = 0.35 * intensity;
-  const shimmerFilter = offlineCtx.createBiquadFilter();
-  shimmerFilter.type = "highpass";
-  shimmerFilter.frequency.value = 3500;
-
-  // Feedback loop for shimmer
-  shimmer.connect(shimmerFilter);
-  shimmerFilter.connect(shimmerGain);
-  shimmerGain.connect(shimmer);
-
-  // Reverb simulation (soft lowpass tail)
-  const reverb = offlineCtx.createBiquadFilter();
-  reverb.type = "lowpass";
-  reverb.frequency.value = 2500 + intensity * 2500;
-
-  // LFO for subtle movement
-  const lfo = offlineCtx.createOscillator();
-  const lfoGain = offlineCtx.createGain();
-  lfo.frequency.value = 0.1 + intensity * 0.2; // slow movement
-  lfoGain.gain.value = 0.015 * intensity;
-  lfo.connect(lfoGain).connect(reverb.frequency);
-
-  // Routing
-  const merger = offlineCtx.createChannelMerger(2);
-  const wetGain = offlineCtx.createGain();
-  const dryGain = offlineCtx.createGain();
-
-  wetGain.gain.value = 0.7 * intensity;
-  dryGain.gain.value = 1.0 - 0.4 * intensity;
-
-  const leftChain = offlineCtx.createGain();
-  const rightChain = offlineCtx.createGain();
-
-  source.connect(delayLeft).connect(shimmer).connect(reverb).connect(leftChain);
-  source.connect(delayRight).connect(shimmer).connect(reverb).connect(rightChain);
-
-  leftChain.connect(merger, 0, 0);
-  rightChain.connect(merger, 0, 1);
-
-  merger.connect(wetGain);
-  source.connect(dryGain);
-
-  const output = offlineCtx.createGain();
-  wetGain.connect(output);
-  dryGain.connect(output);
-  output.connect(offlineCtx.destination);
-
-  lfo.start();
-  source.start(0);
+  source.buffer = outBuffer;
+  const filter = offlineCtx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = 12000 - intensity * 4000;
+  source.connect(filter).connect(offlineCtx.destination);
+  source.start();
 
   const rendered = await offlineCtx.startRendering();
-
-  // --- Convert to WAV and auto-download ---
   const wav = audioBufferToWav(rendered);
   const blob = new Blob([new DataView(wav)], { type: "audio/wav" });
   const url = URL.createObjectURL(blob);
 
-  const player = document.getElementById("player");
-  player.src = url;
-  player.play();
-
-  // ✅ Auto-download
-  const fileName = "ethereal_vocal.wav";
-  const a = document.createElement("a");
-  a.style.display = "none";
-  a.href = url;
-  a.download = fileName;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  // ✅ Update visible download button (optional)
-  const dl = document.getElementById("downloadLink");
-  dl.href = url;
-  dl.download = fileName;
-  dl.textContent = "Re-download Ethereal Vocal";
-  dl.classList.remove("hidden");
-}
-
-// --- Handle file upload processing ---
-document.getElementById("processBtn").addEventListener("click", async () => {
-  const fileInput = document.getElementById("audioFile");
-  if (fileInput.files.length === 0) {
-    alert("Please upload or record a vocal first.");
-    return;
-  }
-  const file = fileInput.files[0];
-  await processVocal(file);
-});
-
-// --- Recording logic ---
-let mediaRecorder;
-let recordedChunks = [];
-let isRecording = false;
-
-const recordBtn = document.getElementById("recordBtn");
-const recordStatus = document.getElementById("recordStatus");
-
-recordBtn.addEventListener("click", async () => {
-  if (!isRecording) {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    mediaRecorder = new MediaRecorder(stream);
-    recordedChunks = [];
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunks.push(e.data);
-    };
-
-    mediaRecorder.onstop = async () => {
-      const blob = new Blob(recordedChunks, { type: "audio/webm" });
-      const arrayBuffer = await blob.arrayBuffer();
-      const file = new File([arrayBuffer], "recorded_vocal.wav", {
-        type: "audio/wav",
-      });
-
-      const fileInput = document.getElementById("audioFile");
-      const dataTransfer = new DataTransfer();
-      dataTransfer.items.add(file);
-      fileInput.files = dataTransfer.files;
-
-      recordStatus.textContent = "Recording complete — ready to process!";
-      recordBtn.style.background = "red";
-    };
-
-    mediaRecorder.start();
-    isRecording = true;
-    recordBtn.style.background = "#800000";
-    recordStatus.textContent = "Recording...";
-  } else {
-    mediaRecorder.stop();
-    isRecording = false;
-    recordStatus.textContent = "Finalizing...";
-  }
-});
+  const player = document.getElementBy
